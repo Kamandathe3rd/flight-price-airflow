@@ -1,0 +1,86 @@
+# Flight Price Pipeline: Airflow + MySQL (staging) + PostgreSQL (analytics)
+# Start:  docker compose up -d      Stop:  docker compose down
+# Airflow UI: http://localhost:8080
+
+x-airflow-common-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@airflow-db:5432/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"   # local dev only: no login screen
+  # Connections the DAG will use (name = part after AIRFLOW_CONN_, lower case)
+  AIRFLOW_CONN_MYSQL_STAGING: mysql://staging_user:${MYSQL_PASSWORD}@mysql:3306/flight_staging
+  AIRFLOW_CONN_POSTGRES_ANALYTICS: postgresql://analytics_user:${POSTGRES_ANALYTICS_PASSWORD}@postgres-analytics:5432/flight_analytics
+
+services:
+  # 1. Airflow's own "memory" (its metadata database)
+  airflow-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      retries: 5
+
+  # 2. Staging database (raw CSV lands here)
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: flight_staging
+      MYSQL_USER: staging_user
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3307:3306"        # 3307 on Windows, so it won't clash with a local MySQL
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      retries: 10
+
+  # 3. Analytics database (clean data + KPIs)
+  postgres-analytics:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: analytics_user
+      POSTGRES_PASSWORD: ${POSTGRES_ANALYTICS_PASSWORD}
+      POSTGRES_DB: flight_analytics
+    ports:
+      - "5433:5432"        # 5433 on Windows, so it won't clash with a local Postgres
+    volumes:
+      - analytics-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics_user -d flight_analytics"]
+      interval: 10s
+      retries: 5
+
+  # 4. Airflow (UI, scheduler, DAG processor and triggerer in one container)
+  airflow:
+    image: apache/airflow:3.1.8
+    command: standalone
+    environment: *airflow-env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data
+      - ./sql:/opt/airflow/sql
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      postgres-analytics:
+        condition: service_healthy
+
+volumes:
+  airflow-db-data:
+  mysql-data:
+  analytics-data:
