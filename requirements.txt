@@ -1,0 +1,10 @@
+   # Exact versions inside the apache/airflow:3.1.8 Docker image (Python 3.12),
+   # from Airflow's official constraints-3.1.8 file. Nothing extra is installed:
+   # docker-compose.yaml runs this image as-is.
+   apache-airflow==3.1.8
+   apache-airflow-providers-common-sql==1.32.0
+   apache-airflow-providers-mysql==6.5.0
+   apache-airflow-providers-postgres==6.6.0
+   mysqlclient==2.2.8
+   pandas==2.3.3
+   psycopg2-binary==2.9.11
