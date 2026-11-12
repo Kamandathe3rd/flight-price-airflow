@@ -45,3 +45,50 @@ REQUIRED_CSV_COLUMNS = [
     "Tax & Surcharge (BDT)",
     "Total Fare (BDT)",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: validation rules and reference data
+# ---------------------------------------------------------------------------
+
+# Table that holds the validated (and corrected) rows
+VALIDATED_TABLE = "flight_prices_validated"
+
+# Reference list of valid airports: IATA code -> official airport name.
+# A source/destination is valid only if its code is here AND its name matches.
+VALID_AIRPORTS = {
+    "BKK": "Suvarnabhumi Airport, Bangkok",
+    "BZL": "Barisal Airport",
+    "CCU": "Netaji Subhas Chandra Bose International Airport, Kolkata",
+    "CGP": "Shah Amanat International Airport, Chittagong",
+    "CXB": "Cox's Bazar Airport",
+    "DAC": "Hazrat Shahjalal International Airport, Dhaka",
+    "DEL": "Indira Gandhi International Airport, Delhi",
+    "DOH": "Hamad International Airport, Doha",
+    "DXB": "Dubai International Airport",
+    "IST": "Istanbul Airport",
+    "JED": "King Abdulaziz International Airport, Jeddah",
+    "JFK": "John F. Kennedy International Airport, New York",
+    "JSR": "Jessore Airport",
+    "KUL": "Kuala Lumpur International Airport",
+    "LHR": "London Heathrow Airport",
+    "RJH": "Shah Makhdum Airport, Rajshahi",
+    "SIN": "Singapore Changi Airport",
+    "SPD": "Saidpur Airport",
+    "YYZ": "Toronto Pearson International Airport",
+    "ZYL": "Osmani International Airport, Sylhet",
+}
+
+# Allowed values for the categorical columns (anything else is flagged)
+ALLOWED_VALUES = {
+    "stopovers": ["Direct", "1 Stop", "2 Stops"],
+    "travel_class": ["Economy", "Business", "First Class"],
+    "booking_source": ["Direct Booking", "Online Website", "Travel Agency"],
+    "seasonality": ["Regular", "Winter Holidays", "Hajj", "Eid"],
+}
+
+# Largest gap (BDT) allowed between Total Fare and Base Fare + Tax & Surcharge
+TOTAL_FARE_TOLERANCE_BDT = 1.00
+
+# Quality gate: alert if more than this share of rows is invalid
+MAX_INVALID_SHARE = 0.05

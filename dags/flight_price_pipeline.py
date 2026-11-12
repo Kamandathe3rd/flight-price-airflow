@@ -3,18 +3,25 @@
 This DAG is the pipeline's table of contents: it lists the tasks and their
 order. The real work lives in the ``flight_utils`` package.
 
-Phase 1 (this version):
+Phase 1 (ingestion):
     create_staging_table -> load_csv_to_mysql -> verify_ingestion
 
+Phase 2 (validation):
+    validate_data -> quality_gate
+    validate_data writes flight_prices_validated (is_valid, dq_issues,
+    dq_corrections). quality_gate fails the run if more than 5% of rows
+    are invalid, and logs a WARNING alert if any rows are invalid.
+
 Alerts:
-    Every task retries once (after 30 seconds). Retries, failures and the
-    final DAG result are logged as ALERT blocks (see ``flight_utils/alerts.py``).
+    Every task retries once (after 30 seconds), except quality_gate (a data
+    problem does not fix itself). Retries, failures and the final DAG result
+    are logged as ALERT blocks (see ``flight_utils/alerts.py``).
 """
 from datetime import datetime, timedelta
 
 from airflow.sdk import dag, task
 
-from flight_utils import alerts, ingestion
+from flight_utils import alerts, ingestion, validation
 
 # Settings applied to every task in this DAG
 DEFAULT_ARGS = {
@@ -37,11 +44,11 @@ DEFAULT_ARGS = {
     on_success_callback=alerts.dag_success_alert,
     on_failure_callback=alerts.dag_failure_alert,
     tags=["flight_prices"],
-
 )
 def flight_price_pipeline():
-    """Build the flight price pipeline DAG (Phase 1: ingestion)."""
+    """Build the flight price pipeline DAG (Phases 1 and 2)."""
 
+    # ----- Phase 1: ingestion ------------------------------------------------
     @task
     def create_staging_table():
         """Create the MySQL staging table if it does not exist yet."""
@@ -65,9 +72,33 @@ def flight_price_pipeline():
         """
         ingestion.verify_ingestion(loaded_rows)
 
+    # ----- Phase 2: validation -----------------------------------------------
+    @task
+    def validate_data():
+        """Validate every staging row and write flight_prices_validated.
+
+        Returns:
+            dict: Validation summary (rows, valid/invalid counts, issue counts).
+        """
+        return validation.validate_staging()
+
+    @task(retries=0)
+    def quality_gate(summary):
+        """Stop the pipeline if too many rows are invalid.
+
+        Args:
+            summary (dict): Validation summary from ``validate_data``.
+        """
+        validation.check_quality_gate(summary)
+
+    # ----- Order ---------------------------------------------------------------
     loaded_rows = load_csv_to_mysql()
     create_staging_table() >> loaded_rows
-    verify_ingestion(loaded_rows)
+    ingestion_checked = verify_ingestion(loaded_rows)
+
+    summary = validate_data()
+    ingestion_checked >> summary
+    quality_gate(summary)
 
 
 flight_price_pipeline()
