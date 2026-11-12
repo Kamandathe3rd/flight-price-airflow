@@ -12,6 +12,12 @@ Phase 2 (validation):
     dq_corrections). quality_gate fails the run if more than 5% of rows
     are invalid, and logs a WARNING alert if any rows are invalid.
 
+Phase 3 (transformation and KPIs):
+    compute_kpis reads the valid rows, adds route / season_type /
+    departure_month, and computes the 4 KPI tables: average fare by airline,
+    seasonal fare variation (peak vs non-peak), bookings by airline and
+    most popular routes. The tables are logged and passed on via XCom.
+
 Alerts:
     Every task retries once (after 30 seconds), except quality_gate (a data
     problem does not fix itself). Retries, failures and the final DAG result
@@ -21,7 +27,7 @@ from datetime import datetime, timedelta
 
 from airflow.sdk import dag, task
 
-from flight_utils import alerts, ingestion, validation
+from flight_utils import alerts, ingestion, transform, validation
 
 # Settings applied to every task in this DAG
 DEFAULT_ARGS = {
@@ -46,7 +52,7 @@ DEFAULT_ARGS = {
     tags=["flight_prices"],
 )
 def flight_price_pipeline():
-    """Build the flight price pipeline DAG (Phases 1 and 2)."""
+    """Build the flight price pipeline DAG (Phases 1 and 3)."""
 
     # ----- Phase 1: ingestion ------------------------------------------------
     @task
@@ -91,6 +97,16 @@ def flight_price_pipeline():
         """
         validation.check_quality_gate(summary)
 
+    # ----- Phase 3: transformation and KPIs ----------------------------------
+    @task
+    def compute_kpis():
+        """Enrich the valid rows and compute the 4 KPI tables.
+
+        Returns:
+            dict: {kpi_table_name: list of row dicts} for Phase 4.
+        """
+        return transform.build_kpis()
+
     # ----- Order ---------------------------------------------------------------
     loaded_rows = load_csv_to_mysql()
     create_staging_table() >> loaded_rows
@@ -98,7 +114,10 @@ def flight_price_pipeline():
 
     summary = validate_data()
     ingestion_checked >> summary
-    quality_gate(summary)
+    gate = quality_gate(summary)
+
+    kpi_tables = compute_kpis()
+    gate >> kpi_tables
 
 
 flight_price_pipeline()

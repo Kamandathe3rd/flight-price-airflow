@@ -92,3 +92,10 @@ TOTAL_FARE_TOLERANCE_BDT = 1.00
 
 # Quality gate: alert if more than this share of rows is invalid
 MAX_INVALID_SHARE = 0.05
+
+# ---------------------------------------------------------------------------
+# Phase 3: transformation and KPIs
+# ---------------------------------------------------------------------------
+
+# Seasons counted as "peak" for the seasonal fare KPI ("Regular" = non-peak)
+PEAK_SEASONS = ["Eid", "Hajj", "Winter Holidays"]
