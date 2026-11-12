@@ -18,6 +18,13 @@ Phase 3 (transformation and KPIs):
     seasonal fare variation (peak vs non-peak), bookings by airline and
     most popular routes. The tables are logged and passed on via XCom.
 
+Phase 4 (load into PostgreSQL):
+    load_to_postgres -> verify_postgres_load
+    One transaction: TRUNCATE, bulk COPY of the enriched valid rows into
+    fact_flight_prices, INSERT of the 4 KPI tables, COMMIT (or ROLLBACK on
+    any error). verify_postgres_load then checks PostgreSQL matches MySQL.
+    Test switch: trigger with {"fail_after_copy": true} to prove the rollback.
+
 Alerts:
     Every task retries once (after 30 seconds), except quality_gate (a data
     problem does not fix itself). Retries, failures and the final DAG result
@@ -25,9 +32,9 @@ Alerts:
 """
 from datetime import datetime, timedelta
 
-from airflow.sdk import dag, task
+from airflow.sdk import Param, dag, task
 
-from flight_utils import alerts, ingestion, transform, validation
+from flight_utils import alerts, ingestion, load, transform, validation
 
 # Settings applied to every task in this DAG
 DEFAULT_ARGS = {
@@ -49,10 +56,14 @@ DEFAULT_ARGS = {
     default_args=DEFAULT_ARGS,
     on_success_callback=alerts.dag_success_alert,
     on_failure_callback=alerts.dag_failure_alert,
+    params={
+        # TEST ONLY: make the PostgreSQL load fail after COPY (proves rollback)
+        "fail_after_copy": Param(False, type="boolean"),
+    },
     tags=["flight_prices"],
 )
 def flight_price_pipeline():
-    """Build the flight price pipeline DAG (Phases 1 and 3)."""
+    """Build the flight price pipeline DAG (Phases 1 to 4)."""
 
     # ----- Phase 1: ingestion ------------------------------------------------
     @task
@@ -107,6 +118,29 @@ def flight_price_pipeline():
         """
         return transform.build_kpis()
 
+    # ----- Phase 4: load into PostgreSQL --------------------------------------
+    @task
+    def load_to_postgres(kpi_tables, params=None):
+        """Load the fact rows and KPI tables into PostgreSQL in one transaction.
+
+        Args:
+            kpi_tables (dict): KPI tables from compute_kpis.
+            params (dict): DAG run parameters (filled in by Airflow).
+
+        Returns:
+            dict: Rows loaded per table, plus seconds taken.
+        """
+        return load.load_to_postgres(kpi_tables, fail_after_copy=params["fail_after_copy"])
+
+    @task
+    def verify_postgres_load(load_result):
+        """Check that PostgreSQL matches MySQL after the load.
+
+        Args:
+            load_result (dict): Rows loaded per table, from load_to_postgres.
+        """
+        load.verify_postgres_load(load_result)
+
     # ----- Order ---------------------------------------------------------------
     loaded_rows = load_csv_to_mysql()
     create_staging_table() >> loaded_rows
@@ -118,6 +152,8 @@ def flight_price_pipeline():
 
     kpi_tables = compute_kpis()
     gate >> kpi_tables
+
+    verify_postgres_load(load_to_postgres(kpi_tables))
 
 
 flight_price_pipeline()

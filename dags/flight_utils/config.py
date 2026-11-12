@@ -99,3 +99,11 @@ MAX_INVALID_SHARE = 0.05
 
 # Seasons counted as "peak" for the seasonal fare KPI ("Regular" = non-peak)
 PEAK_SEASONS = ["Eid", "Hajj", "Winter Holidays"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: loading into PostgreSQL
+# ---------------------------------------------------------------------------
+
+# Analytics fact table (one row per valid booking)
+FACT_TABLE = "fact_flight_prices"
