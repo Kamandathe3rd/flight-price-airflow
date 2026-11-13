@@ -1,6 +1,6 @@
 # Flight Price Analysis Pipeline (Apache Airflow)
 
-An end-to-end data pipeline that ingests the **Flight Price Dataset of Bangladesh** (Kaggle, 57,000 bookings), validates and corrects it, computes fare KPIs and loads the results into PostgreSQL for analysis. Orchestrated with **Apache Airflow**, using **MySQL** for staging and **PostgreSQL** for analytics.
+An end-to-end data pipeline that ingests the **Flight Price Dataset of Bangladesh** (Kaggle, 57,000 bookings), validates and corrects it, computes fare KPIs, loads the results into PostgreSQL and shows them on a **Metabase** dashboard. Orchestrated with **Apache Airflow**, using **MySQL** for staging and **PostgreSQL** for analytics.
 
 **Author:** David Kamanda, AmaliTech training programme
 
@@ -13,8 +13,9 @@ An end-to-end data pipeline that ingests the **Flight Price Dataset of Banglades
 | Apache Airflow | 3.1.8 (Docker image `apache/airflow:3.1.8`, Python 3.12) | Orchestration, `LocalExecutor`, `standalone` mode |
 | MySQL | 8.4 (`mysql:8.4`) | Staging database (`flight_staging`) |
 | PostgreSQL | 16 (`postgres:16`) | Analytics database (`flight_analytics`) and Airflow metadata |
+| Metabase | v0.64.6 (`metabase/metabase:v0.64.6`) | KPI dashboard on PostgreSQL (http://localhost:3000) |
 | Python libraries | pandas 2.3.3, MySQL provider 6.5.0, Postgres provider 6.6.0 | See `requirements.txt` (pinned from Airflow's constraints-3.1.8 file) |
-| Docker Desktop | with WSL 2 (Windows) | Runs all four containers |
+| Docker Desktop | with WSL 2 (Windows) | Runs all five containers |
 
 ---
 
@@ -24,8 +25,8 @@ An end-to-end data pipeline that ingests the **Flight Price Dataset of Banglades
 flight-price-airflow/
 ├── README.md                     # this report
 ├── .gitignore                    # data, logs, .env, IDE folders, caches
-├── .env.example                  # password template (copy to .env)
-├── docker-compose.yaml           # Airflow 3.1.8 + MySQL 8.4 + PostgreSQL 16 (x2)
+├── .env.example                  # password template (copy to .env on first setup)
+├── docker-compose.yaml           # Airflow 3.1.8 + MySQL 8.4 + PostgreSQL 16 (x2) + Metabase
 ├── requirements.txt              # pinned versions inside the Airflow image
 ├── dags/
 │   ├── .airflowignore            # skip flight_utils/ when looking for DAGs
@@ -42,7 +43,9 @@ flight-price-airflow/
 ├── docs/
 └── plugins/
 ```
+
 ---
+
 ## 3. Architecture
 
 ```mermaid
@@ -56,11 +59,14 @@ flowchart LR
         FACT[("fact_flight_prices<br/>valid, corrected, enriched")]
         KPI[("kpi_* tables x4")]
     end
+    MB["Metabase<br/>dashboard"]
     CSV -->|"Phase 1: ingest + verify"| STG
     STG -->|"Phase 2: validate + quality gate"| VAL
     VAL -->|"Phase 3: enrich + KPIs"| K{{"KPI tables<br/>(XCom)"}}
     VAL -->|"Phase 4: COPY in one transaction"| FACT
     K -->|"Phase 4: INSERT, same transaction"| KPI
+    FACT -.->|"read only"| MB
+    KPI -.->|"read only"| MB
 ```
 
 **Design principles**
@@ -71,6 +77,7 @@ flowchart LR
 - **One place for each setting or formula:** paths, connection IDs, column names, reference data, thresholds and peak seasons live in `dags/flight_utils/config.py`. Total Fare = Base + Tax is applied once (Phase 2).
 - **Thin DAG, testable helpers:** the DAG file only lists tasks and their order. The logic lives in the `flight_utils` package, and the KPI and rule functions are pure (no database), so they can be tested with small DataFrames.
 - **Idempotent:** every step can be re-run safely (`CREATE TABLE IF NOT EXISTS`, `TRUNCATE` + reload).
+- **Writers and readers are separate:** Airflow writes the analytics tables. Metabase only reads them.
 
 ---
 
@@ -137,7 +144,7 @@ Each rule is a function returning `{label: mask}`. Rows are labelled, not delete
 
 **Quality gate:** 0 invalid rows passes. Up to 5% invalid passes with a `⚠️ ALERT: DATA QUALITY` warning (invalid rows are excluded from KPIs). More than 5% fails the run.
 
-**Result on the real data:** 57,000 rows, **57,000 valid**, **2,522 totals corrected**. The dataset has no nulls, negative fares, invalid airports or duplicates. Every rule was proven with planted bad rows (`sql/test_inject_bad_rows.sql`; see section 8).
+**Result on the real data:** 57,000 rows, **57,000 valid**, **2,522 totals corrected**. The dataset has no nulls, negative fares, invalid airports or duplicates. Every rule was proven with planted bad rows (`sql/test_inject_bad_rows.sql`; see section 10).
 
 ---
 
@@ -162,6 +169,13 @@ All KPIs use **valid rows only** and the **corrected** `total_fare_bdt`. Peak se
 | Most bookings | US-Bangla Airlines **4,496** (7.89%), about 2× any other airline (2,201–2,368) |
 | Most popular route | **RJH → SIN, 417 bookings**, then DAC → DXB (413) and BZL → YYZ (410) |
 
+**Insights**
+
+- Season matters far more than airline: airline averages sit within about 10% of each other (67.5k–74.7k BDT), while Hajj fares are 43% above non-peak.
+- US-Bangla has about twice the bookings of any other airline.
+- Demand is spread evenly across routes: every one of the 152 routes has between about 310 and 417 bookings.
+- The top routes are international (SIN, DXB, YYZ, BKK). Domestic routes such as CGP-CXB are just as popular but much cheaper (≈ 7.6k BDT).
+
 **Cross-check:** the same KPIs computed in plain SQL (`sql/kpi_crosscheck.sql`) match the pandas results exactly (largest difference across all 24 airline averages: 0.00).
 
 ---
@@ -180,7 +194,26 @@ All rows of one load share the same `loaded_at`/`computed_at`, because PostgreSQ
 
 ---
 
-## 9. Alerts, testing and evidence
+## 9. KPI dashboard (Metabase)
+
+A fifth container, **Metabase**, reads the PostgreSQL analytics tables and shows the KPIs on the dashboard **Bangladesh Flight Fares** (http://localhost:3000). Metabase only reads; the pipeline writes.
+
+| Card | Source table | Chart | Shows |
+|---|---|---|---|
+| Average fare by airline (BDT) | `fact_flight_prices` (average per airline) | Row, highest first | Turkish Airlines 74,738.63 at the top, Vistara 67,497.63 at the bottom |
+| Average fare by season (BDT) | `fact_flight_prices` (average per season type and season) | Bar, coloured Peak / Non-peak | Hajj 96,189.95, Eid 90,790.87, Winter Holidays 79,256.33, Regular 67,337.33 |
+| Bookings by airline | `kpi_bookings_by_airline` | Row, most first | US-Bangla 4,496 |
+| Top 10 routes by bookings | `kpi_popular_routes` (route rank ≤ 10) | Row, most first | RJH-SIN 417 … CGP-RJH 403 |
+| Total valid bookings | `fact_flight_prices` (count of rows) | Number | 57,000 |
+| Peak season premium | `kpi_seasonal_fare_variation` (Peak, All) | Number | +20.43% |
+
+**Connect Metabase to PostgreSQL** (first-time setup): type PostgreSQL, host `postgres-analytics`, port `5432`, database `flight_analytics`, user `analytics_user`, password from `.env`. Metabase runs inside Docker, so it uses the service name, not `localhost:5433`.
+
+The dashboard is **live**: it queries PostgreSQL on every refresh, so each pipeline run updates it. Tested by changing a KPI value directly in PostgreSQL (the card changed), then running the pipeline (the card returned to the true value). The dashboard itself is stored in Metabase's Docker volume (`metabase-data`), not in this repository.
+
+---
+
+## 10. Alerts, testing and evidence
 
 **Alerts** (`flight_utils/alerts.py`): every task retries once after 30 seconds. Callbacks write `⚠️ ALERT: TASK WILL BE RETRIED`, `🚨 ALERT: TASK FAILED`, `✅ ALERT: DAG RUN SUCCEEDED` and `🚨 ALERT: DAG RUN FAILED`. Task alerts appear in the task log. DAG alerts appear in `logs/dag_processor/<date>/dags-folder/flight_price_pipeline.py.log`. Search for `ALERT`.
 
@@ -189,23 +222,25 @@ All rows of one load share the same `loaded_at`/`computed_at`, because PostgreSQ
 | Ingestion check | Delete 10 staging rows, then Clear `verify_ingestion` | Fails: `MySQL 56990` plus 3 sum mismatches |
 | Every validation rule | Run `sql/test_inject_bad_rows.sql`, then Clear `validate_data` (with downstream) | 8 planted rows: 7 invalid (one per rule), 1 total calculated. Gate passes with a warning. |
 | Quality gate | Set 3,000 rows to class `Premium`, then Clear `validate_data` | Gate fails at 5.27% (> 5%), with no retry |
-| KPI formulas | 3-row DataFrame test (see `kpis.py` docstrings) | Matches the hand calculation (A = 200, peak −42.86%) |
+| KPI formulas | 3-row DataFrame test | Matches the hand calculation (A = 200, peak −42.86%) |
 | KPI cross-check | `sql/kpi_crosscheck.sql` | Same numbers as pandas |
 | Load verification | Delete 5 rows in PostgreSQL, then Clear `verify_postgres_load` | Fails: `56995`, `min staging_id 6` |
 | Rollback | Trigger with `fail_after_copy = true` | Load fails twice, PostgreSQL keeps 57,000 rows and the same `loaded_at` |
+| Live dashboard | `UPDATE kpi_bookings_by_airline SET booking_count = 9999 WHERE airline = 'US-Bangla Airlines'`, refresh, then trigger the DAG | Card shows 9,999, then back to 4,496 after the run |
 
 **Undo any test:** trigger the full DAG (the CSV reload rebuilds every layer).
 
 ---
 
-## 10. Challenges and resolutions
+## 11. Challenges and resolutions
 
 | Challenge | Resolution |
 |---|---|
-| Airflow does not run natively on Windows | Docker Desktop + WSL 2, with Airflow, MySQL and both Postgres instances in one `docker-compose.yaml` |
+| Airflow does not run natively on Windows | Docker Desktop + WSL 2, with every service in one `docker-compose.yaml` |
 | Port clashes with locally installed databases | Mapped MySQL to 3307 and PostgreSQL to 5433 on Windows |
 | `docker compose up` failed with "cannot find dockerDesktopLinuxEngine" | Docker Desktop was closed. Learned that `config` validates without the engine but `up` needs it. |
 | Passwords must not be committed | `.env` (git-ignored) plus `.env.example`. Connections defined as `AIRFLOW_CONN_*` variables. |
+| `.env` was overwritten with the template, so its passwords no longer matched the database volumes | Recovered and restored the original passwords. Used `docker compose up -d --dry-run` to confirm no container would be re-created with the wrong values. |
 | CSV headers contain spaces and symbols | `COLUMN_MAP` in `config.py` renames them to snake_case in one place |
 | Float vs `DECIMAL` rounding | Rounded to 2 dp in pandas before loading. Compared totals with a 0.01 BDT tolerance. |
 | `IndentationError` and empty files (unsaved) broke DAG imports | Used `airflow dags list-import-errors` to find the file and line. Other DAGs kept running meanwhile. |
@@ -215,35 +250,42 @@ All rows of one load share the same `loaded_at`/`computed_at`, because PostgreSQ
 | DataFrames cannot travel through XCom, and XCom is for small data | KPI tables are sent as lists of dicts (about 28 KB). The 57,000 rows are re-read from MySQL with the same `enrich` function. |
 | A partially loaded analytics table would mislead users | A single PostgreSQL transaction. Proven with the `fail_after_copy` switch. |
 | Every row had the same `loaded_at` | Not a bug: `CURRENT_TIMESTAMP` is the transaction start time, which is evidence of one transaction |
+| pgAdmin and Metabase need different addresses for the same database | From Windows (pgAdmin): `localhost:5433`. Inside Docker (Metabase, Airflow): `postgres-analytics:5432`, because `localhost` there means the container itself. |
+| The first routes chart grouped by an auto-binned rank and showed no routes | Grouped by route, filtered rank ≤ 10 ("equal to 10" showed only one route), sorted descending, used a Row chart |
 
 ---
 
-## 11. Limitations and next steps
+## 12. Limitations and next steps
 
 - Add a `duplicate_row` validation rule.
 - Schedule the DAG (e.g. daily) when the source is refreshed.
 - Add email or Slack notifications to the alert callbacks.
 - Move the in-container tests into a `pytest` suite.
-- `SIMPLE_AUTH_MANAGER_ALL_ADMINS` (no login) is for local development only.
+- Give Metabase a read-only PostgreSQL user instead of `analytics_user`.
+- Save the dashboard's queries in the repository so it can be rebuilt without the Metabase volume.
+- `SIMPLE_AUTH_MANAGER_ALL_ADMINS` (no Airflow login) is for local development only.
 
 ---
 
-## 12. How to run (Windows)
+## 13. How to run (Windows)
 
 **Prerequisites:** Docker Desktop (WSL 2) running, Git, and the CSV from Kaggle ("Flight Price Dataset of Bangladesh").
 
 ```powershell
 git clone <your-repo-url> flight-price-airflow
 cd flight-price-airflow
-Copy-Item .env.example .env        # then set the 4 passwords in .env (notepad .env)
+Copy-Item .env.example .env        # FIRST setup only: then set the 4 passwords (notepad .env)
 # Put Flight_Price_Dataset_of_Bangladesh.csv in the data\ folder
 docker compose up -d               # first start downloads the images
-docker compose ps                  # 4 containers Up; mysql and both postgres (healthy)
+docker compose ps                  # 5 containers Up; databases and metabase (healthy)
 ```
+
+⚠️ Copy `.env.example` only on a **fresh** setup. Once the databases exist, their passwords are fixed; overwriting `.env` breaks the connections.
 
 1. Open **http://localhost:8080** (no login in local mode).
 2. Open **flight_price_pipeline**, switch the toggle **on**, then click **Trigger** (leave `fail_after_copy` off).
 3. Expect **8 green tasks** in 1–2 minutes.
+4. Optional dashboard: open **http://localhost:3000**, create a local admin account, connect PostgreSQL as described in section 9, and build the cards listed there.
 
 **Check the results:**
 
@@ -252,13 +294,11 @@ docker compose exec postgres-analytics psql -U analytics_user -d flight_analytic
 docker compose exec postgres-analytics psql -U analytics_user -d flight_analytics -c "SELECT * FROM kpi_popular_routes ORDER BY route_rank LIMIT 10"
 ```
 
-**Stop:** `docker compose down` (keeps the data) or `docker compose down -v` (deletes the data).
-
-
+**Stop:** `docker compose down` (keeps the data and the dashboard) or `docker compose down -v` (deletes the data **and** the Metabase dashboard).
 
 ---
 
-## 13. Deliverables
+## 14. Deliverables
 
 | Deliverable | Where |
 |---|---|
@@ -267,4 +307,5 @@ docker compose exec postgres-analytics psql -U analytics_user -d flight_analytic
 | Transformation and KPIs | `dags/flight_utils/transform.py`, `dags/flight_utils/kpis.py`, task 6 |
 | Load into PostgreSQL | `dags/flight_utils/load.py`, `sql/03_postgres_analytics.sql`, tasks 7–8 |
 | Orchestration | `dags/flight_price_pipeline.py`, `docker-compose.yaml` |
-| Documentation report | This `README.md` (sections 2–9) |
+| KPI visuals | Metabase dashboard "Bangladesh Flight Fares" (section 9) |
+| Documentation report | This `README.md` (sections 3–11) |
